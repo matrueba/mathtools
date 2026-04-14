@@ -30,4 +30,14 @@ ENVIRONMENTS = {
             ("skills", "skills", "skills", "~/.config/opencode/skills"),
         ],
     },
+    "claude": {
+        "label": "Claude Code",
+        "description": "Claude Code (.claude) – supports agents, commands & skills",
+        "target_dir": ".claude",
+        "sources": [
+            ("framework", "src/agents", "agents", "~/.claude/agents"),
+            ("framework", "src/commands", "commands", "~/.claude/commands"),
+            ("skills", "skills", "skills", "~/.claude/skills"),
+        ],
+    },
 }
