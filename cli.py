@@ -183,9 +183,9 @@ def gather_selections(zips_bytes: dict[str, bytes], selected_envs: list[str]) ->
     for env_key in selected_envs:
         env = ENVIRONMENTS[env_key]
         selections[env_key] = {}
-        console.print(f"\n[bold bright_magenta]✦ Configuration for {env['label']}[/]")
+        console.print(f"\n[bold bright_magenta]✦ Component Selection for {env['label']}[/]")
         
-        for repo_name, src_path, dest_subpath in env["sources"]:
+        for repo_name, src_path, dest_subpath, global_path in env["sources"]:
             items = get_available_items(zips_bytes, repo_name, src_path)
             if not items:
                 selections[env_key][src_path] = "all"
@@ -231,17 +231,18 @@ def extract_environment(
     env_key: str,
     dest_root: str,
     env_selections: dict,
-) -> list[str]:
+    mode: str,
+) -> tuple[list[str], str]:
     """
-    Extract the files that belong to *env_key* from the ZIP into *dest_root*.
+    Extract the files that belong to *env_key* from the ZIP into *dest_root* or globally.
 
-    Returns a list of relative paths that were written.
+    Returns a tuple of (written_files_list, target_base_path).
     """
     env = ENVIRONMENTS[env_key]
     target_dir = os.path.join(dest_root, env["target_dir"])
     written: list[str] = []
 
-    for repo_name, src_path, dest_subpath in env["sources"]:
+    for repo_name, src_path, dest_subpath, global_path in env["sources"]:
         prefix = REPOSITORIES[repo_name]["prefix"] + src_path
         if not prefix.endswith("/"):
             prefix += "/"
@@ -264,21 +265,24 @@ def extract_environment(
                     if item_name not in selection:
                         continue
 
-                out_path = os.path.join(target_dir, dest_subpath, relative)
+                if mode == "global":
+                    out_base_dir = os.path.expanduser(global_path)
+                    out_path = os.path.join(out_base_dir, relative)
+                    written.append(os.path.join(global_path, relative))
+                else:
+                    out_base_dir = os.path.join(target_dir, dest_subpath)
+                    out_path = os.path.join(out_base_dir, relative)
+                    written.append(os.path.join(env["target_dir"], dest_subpath, relative))
+
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
                 with zf.open(member) as src, open(out_path, "wb") as dst:
                     shutil.copyfileobj(src, dst)
 
-                # Nice relative path for the summary
-                written.append(
-                    os.path.join(env["target_dir"], dest_subpath, relative)
-                )
-
-    return written
+    return written, "Global (~/)" if mode == "global" else env["target_dir"]
 
 
-def print_summary(results: dict[str, list[str]]) -> None:
+def print_summary(results: dict[str, tuple[list[str], str]]) -> None:
     """Print a final summary table of everything installed."""
     console.print()
 
@@ -291,12 +295,12 @@ def print_summary(results: dict[str, list[str]]) -> None:
     )
     table.add_column("Environment", style="bold white", min_width=20)
     table.add_column("Files", style="dim", justify="right", width=8)
-    table.add_column("Target folder", style="bright_yellow")
+    table.add_column("Location", style="bright_yellow")
 
     total_files = 0
-    for env_key, files in results.items():
+    for env_key, (files, location) in results.items():
         env = ENVIRONMENTS[env_key]
-        table.add_row(env["label"], str(len(files)), env["target_dir"])
+        table.add_row(env["label"], str(len(files)), location)
         total_files += len(files)
 
     console.print(table)
@@ -328,12 +332,38 @@ def main() -> None:
 
         # Check for existing folders
         cwd = os.getcwd()
-        existing = [
-            ENVIRONMENTS[k]["target_dir"]
-            for k in selected
-            if os.path.exists(os.path.join(cwd, ENVIRONMENTS[k]["target_dir"]))
-        ]
+        
+        # Ask mode
+        modes = {}
+        for k in selected:
+            mode = questionary.select(
+                f"Install {ENVIRONMENTS[k]['label']} locally or globally?",
+                choices=[
+                    questionary.Choice("Local (current directory)", value="local"),
+                    questionary.Choice("Global (~/)", value="global")
+                ],
+                style=questionary.Style([('question', 'bold'), ('selected', 'fg:#00ff00')])
+            ).ask()
+            if not mode:
+                raise SystemExit(0)
+            modes[k] = mode
+            
+        existing = []
+        for k in selected:
+            env = ENVIRONMENTS[k]
+            if modes[k] == "local":
+                path = os.path.join(cwd, env["target_dir"])
+                if os.path.exists(path):
+                    existing.append(env["target_dir"])
+            else:
+                for _, _, _, global_path in env["sources"]:
+                    path = os.path.expanduser(global_path)
+                    if os.path.exists(path):
+                        existing.append(global_path)
+                        
         if existing:
+            # Deduplicate the existing list just in case
+            existing = sorted(list(set(existing)))
             console.print(
                 f"\n[bold yellow]⚠  The following folders already exist:[/] "
                 f"{', '.join(existing)}"
@@ -351,7 +381,7 @@ def main() -> None:
         selections = gather_selections(zips_bytes, selected)
 
         # Extract
-        results: dict[str, list[str]] = {}
+        results: dict[str, tuple[list[str], str]] = {}
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -366,8 +396,8 @@ def main() -> None:
                     task,
                     description=f"Installing [bold]{ENVIRONMENTS[env_key]['label']}[/]",
                 )
-                written = extract_environment(zips_bytes, env_key, cwd, selections[env_key])
-                results[env_key] = written
+                written, location = extract_environment(zips_bytes, env_key, cwd, selections[env_key], modes[env_key])
+                results[env_key] = (written, location)
                 progress.advance(task)
 
         print_summary(results)
